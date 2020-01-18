@@ -107,6 +107,7 @@ uint32_t last_seq[CPU_MAX];
 struct {
 	pid_t pid;
 	int depth;
+	int max_mem_bytes;
 	uint64_t start;
 	char cmdline[CMDLINE_DB_MAX];
 } pid_db[PID_DB_SIZE];
@@ -353,6 +354,7 @@ handle_msg(struct cn_msg *cn_hdr)
 			pid_db[i].pid = pid;
 			pid_db[i].depth = d;
 			pid_db[i].start = ev->timestamp_ns;
+			pid_db[i].max_mem_bytes = 1234;
 		}
 
 		if (show_cwd) {
@@ -437,8 +439,11 @@ handle_msg(struct cn_msg *cn_hdr)
 		else
 			fprintf(output, " exited status=%d",
 			    WEXITSTATUS(ev->event_data.exit.exit_code));
+
 		fprintf(output, " time=%.3fs\n",
 		    (ev->timestamp_ns - pid_db[i].start) / 1e9);
+
+		fprintf(output, " max_mem_bytes=%d",pid_db[i].max_mem_bytes);
 		fflush(output);
 	}
 }
