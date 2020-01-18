@@ -1,2 +1,7 @@
 *.swp
 *.swo
+.jansson-2.12
+extrace
+pwait
+jansson*.bz2
+libjansson.a

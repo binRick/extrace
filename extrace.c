@@ -73,6 +73,16 @@
 #include <time.h>
 #include <unistd.h>
 
+
+#include <libcgroup.h>
+
+#include <string.h>
+#include <inttypes.h>
+#include <getopt.h>
+
+#include <jansson.h>
+
+
 #define max(x, y) ((y) < (x) ? (x) : (y))
 #define min(x, y) ((y) > (x) ? (x) : (y))
 
@@ -84,12 +94,13 @@
 #define SEND_MESSAGE_SIZE (NLMSG_SPACE(SEND_MESSAGE_LEN))
 #define RECV_MESSAGE_SIZE (NLMSG_SPACE(RECV_MESSAGE_LEN))
 
-#define BUFF_SIZE (max(max(SEND_MESSAGE_SIZE, RECV_MESSAGE_SIZE), 1024))
+#define BUFF_SIZE (max(max(SEND_MESSAGE_SIZE, RECV_MESSAGE_SIZE), 2048))
 #define MIN_RECV_SIZE (min(SEND_MESSAGE_SIZE, RECV_MESSAGE_SIZE))
 
 #define CMDLINE_MAX 32768
 #define CMDLINE_DB_MAX 32
 pid_t parent = 1;
+int json = 0;
 int flat = 0;
 int run = 0;
 int full_path = 0;
@@ -103,7 +114,7 @@ sig_atomic_t quit = 0;
 #define CPU_MAX 4096
 uint32_t last_seq[CPU_MAX];
 
-#define PID_DB_SIZE 1024
+#define PID_DB_SIZE 2048
 struct {
 	pid_t pid;
 	int depth;
@@ -112,13 +123,198 @@ struct {
 	char cmdline[CMDLINE_DB_MAX];
 } pid_db[PID_DB_SIZE];
 
+struct group {
+    unsigned long int shares;
+    unsigned int procs;
+    char* path;
+    struct group* child;
+    struct group* next;
+};
+
+struct group* creategroup(char* path){
+
+    struct group* grp=NULL;
+    struct cgroup * group;
+    struct cgroup_controller * control;
+    pid_t * procs=NULL;
+    int proccount=0;
+    int64_t value=0;
+
+    group = cgroup_new_cgroup(path);
+    cgroup_get_cgroup(group);
+    control = cgroup_get_controller(group, "cpu");
+    cgroup_get_value_int64(control, "cpu.shares", &value);
+    cgroup_get_procs(path,"cpu", &procs, &proccount);
+
+    grp = malloc(sizeof(struct group));
+    grp->path = path;
+    grp->procs = proccount;
+    grp->shares = value;
+    grp->child = NULL;
+    grp->next = NULL;
+    free(group);
+    free(control);
+
+    return grp;
+}
+void calculatecpu(struct group* parent,double pct,int flags){
+    struct group* current=NULL;
+    int totalshares=0;
+
+    if((flags==1) ||(parent->procs > 0)){
+        totalshares=parent->shares;
+    }
+    current = parent->child;
+    while(current != NULL){
+        totalshares+=current->shares;
+        current=current->next;
+    }
+
+    if((flags == 1) || (parent->procs > 0)){
+        printf("%-40s %6.2f%% (%d processes)\n",parent->path, ((double)parent->shares/(double)totalshares)*pct,parent->procs);
+    }else{
+        printf("%-40s %6s  (%d processes)\n",parent->path,"-", parent->procs);
+    }
+    current = parent->child;
+    while(current != NULL){
+        calculatecpu(current, ((double)current->shares/(double)totalshares)*pct,flags);
+        current=current->next;
+    }
+
+}
+
+char * stripslashes(const char * string){
+    int len;
+    int i;
+    int count=0;
+    char * path;
+
+    len = strlen(string);
+    for(i=0;i<len;i++){
+        if(*(string+i)=='/'){
+            count++;
+        }else{
+            break;
+        }
+    }
+
+    //if there was a leading slash make sure we keep one
+    if(count>0){
+        count--;
+    }
+
+    len-=count;
+    path = malloc(len+1);
+    strcpy(path,(string+count));
+
+    for(i=len;i>0;i--){
+        if(*(path+i) == '/'){
+            *(path+i)='\0';
+        }else if(*(path+i) != '\0'){
+            break;
+        }
+    }
+
+    return path;
+}
+
+
+struct group*  buildtree(char* mountpoint, char * basepath, int flags){
+    struct cgroup * group;
+    struct cgroup_controller * control;
+    struct cgroup_file_info info;
+    void *walkhandle;
+    int base=0;
+    int ret;
+    int len;
+    int64_t value=0;
+    pid_t * procs=NULL;
+    int proccount=0;
+    char * path;
+    struct group* first=NULL;
+    struct group* grp=NULL;
+    struct group* current=NULL;
+
+    len=strlen(mountpoint);
+    ret = cgroup_walk_tree_begin("cpu", basepath,1 , &walkhandle, &info, &base);
+    while(ret != ECGEOF ){
+        if(info.type == CGROUP_FILE_TYPE_DIR ){
+            group = cgroup_new_cgroup((info.full_path+len));
+            cgroup_get_cgroup(group);
+            control = cgroup_get_controller(group, "cpu");
+            cgroup_get_value_int64(control, "cpu.shares", &value);
+            path = stripslashes((info.full_path+len));
+            cgroup_get_procs(path,"cpu", &procs, &proccount);
+
+            grp = malloc(sizeof(struct group));
+            grp->path = path;
+            grp->procs = proccount;
+            grp->shares = value;
+            grp->child = NULL;
+            grp->next = NULL;
+            if(strcmp(grp->path,basepath) != 0){
+                grp->child = buildtree(mountpoint, grp->path, flags);
+
+                if((flags == 1) || (grp->child != NULL || grp->procs != 0)){
+                    if(first == NULL){
+                        first = grp;
+                    }else{
+                        current->next = grp;
+                    }
+                    current = grp;
+                }else{
+                    free(grp->path);
+                    free(grp);
+                }
+            }
+            free(group);
+            free(control);
+        }
+        ret = cgroup_walk_tree_next(1, &walkhandle, &info, base);
+    }
+    ret = cgroup_walk_tree_end(&walkhandle);
+    free(walkhandle);
+    return first;
+}
+
+
 static int
 open_proc_dir(pid_t pid) {
 	char name[48];
 	snprintf(name, sizeof name, "/proc/%d", pid);
 	return open(name, O_DIRECTORY);
 }
+static int
+pid_parent(pid_t pid)
+{
+	pid_t ppid = 0;
+	char name[PATH_MAX];
+	char buf[2048];
+	char *s;
+	int fd, d, i;
 
+	snprintf(name, sizeof name, "/proc/%d/stat", pid);
+
+	if ((fd = open(name, O_RDONLY)) < 0)
+		return 0;
+	if (read(fd, buf, sizeof buf) <= 0)
+		return 0;
+	close(fd);
+
+	s = strrchr(buf, ')');  /* find end of COMM (recommended way) */
+	if (!s)
+		return 0;
+	while (*++s == ' ')
+		;
+	/* skip over STATE */
+	while (*++s == ' ')
+		;
+	errno = 0;
+	ppid = strtol(s, 0, 10);  /* parse PPID */
+	if (errno != 0)
+		return 0;
+    return ppid;
+}
 static int
 pid_depth(pid_t pid)
 {
@@ -166,6 +362,8 @@ pid_depth(pid_t pid)
 
 	return d + 1;
 }
+
+
 
 static const char *
 sig2name(int sig)
@@ -363,51 +561,71 @@ handle_msg(struct cn_msg *cn_hdr)
 				cwd[r3] = 0;
 		}
 
-		if (!flat)
-			fprintf(output, "%*s", 2*d, "");
-		fprintf(output, "%d", pid);
-		if (show_exit) {
-			putc('+', output);
-			snprintf(pid_db[i].cmdline, CMDLINE_DB_MAX,
-			    "%s", cmdline);
-		}
-		if (show_user) {
-			struct stat st;
-			struct passwd *p;
+        if(!json){
+            if (!flat)
+                fprintf(output, "%*s", 2*d, "");
+            fprintf(output, "%d", pid);
+            if (show_exit) {
+                putc('+', output);
+                snprintf(pid_db[i].cmdline, CMDLINE_DB_MAX,
+                    "%s", cmdline);
+            }
+            if (show_user) {
+                struct stat st;
+                struct passwd *p;
 
-			if (fstat(proc_dir_fd, &st) < 0)
-				st.st_uid = -1;
-			if ((p = getpwuid(st.st_uid)))
-				fprintf(output," <%s>", p->pw_name);
-			else
-				fprintf(output," <%d>", st.st_uid);
-		}
-		putc(' ', output);
-		if (show_cwd) {
-			print_shquoted(cwd);
-			fprintf(output, " %% ");
-		}
+                if (fstat(proc_dir_fd, &st) < 0)
+                    st.st_uid = -1;
+                if ((p = getpwuid(st.st_uid)))
+                    fprintf(output," <%s>", p->pw_name);
+                else
+                    fprintf(output," <%d>", st.st_uid);
+            }
+            putc(' ', output);
+            if (show_cwd) {
+                print_shquoted(cwd);
+                fprintf(output, " %% ");
+            }
 
-		if (full_path)
-			print_shquoted(exe);
-		else
-			print_shquoted(cmdline);
+            if (full_path)
+                print_shquoted(exe);
+            else
+                print_shquoted(cmdline);
 
-		if (show_args && r > 0) {
-			while (argvrest - cmdline < r) {
-				putc(' ', output);
-				print_shquoted(argvrest);
-				argvrest = strchr(argvrest, 0)+1;
-			}
-		}
+            if (show_args && r > 0) {
+                while (argvrest - cmdline < r) {
+                    putc(' ', output);
+                    print_shquoted(argvrest);
+                    argvrest = strchr(argvrest, 0)+1;
+                }
+            }
 
-		if (r == sizeof cmdline)
-			fprintf(output, "... <truncated>");
+            if (r == sizeof cmdline)
+                fprintf(output, "... <truncated>");
 
-		if (show_env)
-			print_env(proc_dir_fd);
+            if (show_env)
+                print_env(proc_dir_fd);
 
-		close(proc_dir_fd);
+            close(proc_dir_fd);
+        }else{
+
+           struct stat st;
+           struct passwd *p;
+
+           if (fstat(proc_dir_fd, &st) < 0)
+               st.st_uid = -1;
+            p = getpwuid(st.st_uid);
+
+            pid_t ppid = pid_parent(pid);
+
+            fprintf(output, "{\"type\": \"start\", \"user\": \"%s\", \"uid\": %d, \"pid\": %d, \"ppid\": %d, \"cmdline\": \"xxx\"}\n",
+                p->pw_name,
+                st.st_uid,
+                pid,
+                ppid,
+                cmdline
+            );
+        }
 
 		fprintf(output, "\n");
 		fflush(output);
@@ -425,27 +643,33 @@ handle_msg(struct cn_msg *cn_hdr)
 
 		if (!show_exit)
 			return;
+        
+        if(!json){
+            if (!flat)
+                fprintf(output, "%*s",2*pid_db[i].depth, "");
 
-		if (!flat)
-			fprintf(output, "%*s",
-			    2*pid_db[i].depth, "");
+            fprintf(output, "%d- ", pid);
+            print_shquoted(pid_db[i].cmdline);
 
-		fprintf(output, "%d- ", pid);
-		print_shquoted(pid_db[i].cmdline);
+            if (!WIFEXITED(ev->event_data.exit.exit_code))
+                fprintf(output, " exited signal=%s",
+                    sig2name(WTERMSIG(ev->event_data.exit.exit_code)));
+            else
+                fprintf(output, " exited status=%d",
+                    WEXITSTATUS(ev->event_data.exit.exit_code));
 
-		if (!WIFEXITED(ev->event_data.exit.exit_code))
-			fprintf(output, " exited signal=%s",
-			    sig2name(WTERMSIG(ev->event_data.exit.exit_code)));
-		else
-			fprintf(output, " exited status=%d",
-			    WEXITSTATUS(ev->event_data.exit.exit_code));
+            fprintf(output, " time=%.3fs\n",
+                (ev->timestamp_ns - pid_db[i].start) / 1e9);
 
-
-		fprintf(output, " max_mem_bytes=%d",pid_db[i].max_mem_bytes);
-
-		fprintf(output, " time=%.3fs\n",
-		    (ev->timestamp_ns - pid_db[i].start) / 1e9);
-
+        }else{
+                fprintf(output, "{\"type\": \"end\", \"signal\": \"%s\", \"exit_code\": %d, \"max_mem_bytes\": %d, \"ms\": \"%.3f\", \"pid\": %d}\n",
+                    sig2name(WTERMSIG(ev->event_data.exit.exit_code)),
+                    WEXITSTATUS(ev->event_data.exit.exit_code),
+                    pid_db[i].max_mem_bytes,
+                    ((ev->timestamp_ns - pid_db[i].start) / 1e9 * 1000),
+                    pid
+                );
+        }
 
 		fflush(output);
 	}
@@ -474,6 +698,32 @@ parse_pid(char *s)
 	return pid;
 }
 
+
+static int change_group_path(pid_t pid, struct cgroup_group_spec *cgroup_list[])
+{
+    int i;
+    int ret = 0;
+
+    /*
+    for (i = 0; i < CG_HIER_MAX; i++) {
+        if (!cgroup_list[i])
+            break;
+
+        ret = cgroup_change_cgroup_path(cgroup_list[i]->path, pid,
+                                                (const char*const*) cgroup_list[i]->controllers);
+        if (ret) {
+            fprintf(stderr, "Error changing group of pid %d: %s\n",
+                pid, cgroup_strerror(ret));
+            return -1;
+        }
+    }
+    */
+
+    return 0;
+}
+
+
+
 int
 main(int argc, char *argv[])
 {
@@ -490,11 +740,36 @@ main(int argc, char *argv[])
 
 	output = stdout;
 
-	while ((opt = getopt(argc, argv, "+deflo:p:qtwu")) != -1)
+    char * mountpoint;
+    char ch;
+    int flags=0;
+    struct group* __parent=NULL;
+    //struct cgroup_group_spec *cgroup_list[CG_HIER_MAX];
+
+/*
+    cgroup_init();
+    cgroup_get_subsys_mount_point ("cpu", &mountpoint);
+    __parent = creategroup("test11");
+
+    __parent->child = buildtree(mountpoint,"/",flags);
+    calculatecpu(__parent,100.0,flags);
+
+    __parent->child = buildtree(mountpoint,"test11",flags);
+    calculatecpu(__parent,100.0,flags);
+
+    __parent->child = buildtree(mountpoint,"backup.slice",flags);
+    calculatecpu(__parent,100.0,flags);
+
+    __parent->child = buildtree(mountpoint,"system.slice",flags);
+    calculatecpu(__parent,100.0,flags);
+*/
+
+	while ((opt = getopt(argc, argv, "+defjlo:p:qtwu")) != -1)
 		switch (opt) {
 		case 'd': show_cwd = 1; break;
 		case 'e': show_env = 1; break;
 		case 'f': flat = 1; break;
+		case 'j': json = 1; break;
 		case 'l': full_path = 1; break;
 		case 'p': parent = parse_pid(optarg); break;
 		case 'q': show_args = 0; break;
