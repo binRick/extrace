@@ -80,9 +80,6 @@
 #include <inttypes.h>
 #include <getopt.h>
 
-//#include <jansson.h>
-
-
 #define max(x, y) ((y) < (x) ? (x) : (y))
 #define min(x, y) ((y) > (x) ? (x) : (y))
 
