@@ -617,14 +617,37 @@ handle_msg(struct cn_msg *cn_hdr)
             p = getpwuid(st.st_uid);
 
             pid_t ppid = pid_parent(pid);
+            snprintf(pid_db[i].cmdline, CMDLINE_DB_MAX,"%s", cmdline);
 
-            fprintf(output, "{\"type\": \"start\", \"user\": \"%s\", \"uid\": %d, \"pid\": %d, \"ppid\": %d, \"cmdline\": \"xxx\"}\n",
+
+
+
+
+
+
+
+            fprintf(output, "{\"type\": \"start\", \"user\": \"%s\", \"uid\": %d, \"pid\": %d, \"ppid\": %d, \"cmdline\": \"%s\", \"cwd\": \"%s\", \"exe\": \"%s\"",
                 p->pw_name,
                 st.st_uid,
                 pid,
                 ppid,
-                cmdline
+                cmdline,
+                cwd,
+                exe
             );
+
+           if (show_args && r > 0) {
+               fprintf(output, ", \"args\": \"");
+               while (argvrest - cmdline < r) {
+                   putc(' ', output);
+                   print_shquoted(argvrest);
+                   argvrest = strchr(argvrest, 0)+1;
+               }
+           }
+
+           if (r == sizeof cmdline)
+               fprintf(output, "... <truncated>");
+            fprintf(output, "\"}\n");
         }
 
 		fprintf(output, "\n");
