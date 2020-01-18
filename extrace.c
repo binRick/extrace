@@ -440,10 +440,13 @@ handle_msg(struct cn_msg *cn_hdr)
 			fprintf(output, " exited status=%d",
 			    WEXITSTATUS(ev->event_data.exit.exit_code));
 
+
+		fprintf(output, " max_mem_bytes=%d",pid_db[i].max_mem_bytes);
+
 		fprintf(output, " time=%.3fs\n",
 		    (ev->timestamp_ns - pid_db[i].start) / 1e9);
 
-		fprintf(output, " max_mem_bytes=%d",pid_db[i].max_mem_bytes);
+
 		fflush(output);
 	}
 }
