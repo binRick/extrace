@@ -95,6 +95,7 @@ int run = 0;
 int full_path = 0;
 int show_args = 1;
 int show_cwd = 0;
+int silence_mode = 0;
 int show_env = 0;
 int show_exit = 0;
 int show_user = 0;
@@ -303,6 +304,7 @@ handle_msg(struct cn_msg *cn_hdr)
 		int i = 0;
 		int proc_dir_fd = open_proc_dir(pid);
 		if (proc_dir_fd < 0) {
+          if(silence_mode == 0)
 			fprintf(stderr,
 			    "extrace: process vanished before notification: pid %d\n",
 			    pid);
@@ -330,10 +332,12 @@ handle_msg(struct cn_msg *cn_hdr)
 		d = pid_depth(pid);
 		if (d < 0) {
 			if (*cmdline) {
+              if(silence_mode == 0)
 				fprintf(stderr,
 				    "extrace: process vanished before we found its parent: pid %d: %s\n",
 				    pid, cmdline);
 			} else {
+               if(silence_mode == 0)
 				fprintf(stderr,
 				    "extrace: process vanished without a name: pid %d\n",
 				    pid);
@@ -482,8 +486,9 @@ main(int argc, char *argv[])
 
 	output = stdout;
 
-	while ((opt = getopt(argc, argv, "+deflo:p:qtwu")) != -1)
+	while ((opt = getopt(argc, argv, "+sdeflo:p:qtwu")) != -1)
 		switch (opt) {
+		case 's': silence_mode = 1; break;
 		case 'd': show_cwd = 1; break;
 		case 'e': show_env = 1; break;
 		case 'f': flat = 1; break;
